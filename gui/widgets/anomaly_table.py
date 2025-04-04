@@ -61,6 +61,14 @@ class AnomalyTable(QTableWidget):
         self.setSelectionBehavior(QTableWidget.SelectRows)
         self.setSelectionMode(QTableWidget.SingleSelection)
 
+    def _format_bytes(self, bytes_value):
+        """Format bytes into human readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes_value < 1024:
+                return f"{bytes_value:.1f} {unit}"
+            bytes_value /= 1024
+        return f"{bytes_value:.1f} TB"
+
     def add_anomaly(self, anomaly_data):
         """Add a new anomaly to the table."""
         try:
@@ -69,11 +77,30 @@ class AnomalyTable(QTableWidget):
             
             # Format anomaly details based on type
             if isinstance(anomaly_data, dict):
+                # Skip entries with unknown IP and zero score
+                if anomaly_data.get('ip') == 'Unknown' and anomaly_data.get('score', 0) == 0:
+                    return
+                
                 details = f"IP: {anomaly_data.get('ip', 'Unknown')} | "
-                details += f"Score: {anomaly_data.get('score', 0.0):.3f} | "
-                details += f"Type: {anomaly_data.get('type', 'Unknown')}"
+                details += f"Score: {anomaly_data.get('score', 0.0):.2f}"
+                
+                if 'type' in anomaly_data:
+                    details += f" | Type: {anomaly_data['type']}"
+                
+                if 'details' in anomaly_data:
+                    details += f" | {anomaly_data['details']}"
+                    
+            elif isinstance(anomaly_data, list) and len(anomaly_data) == 4:
+                # Network statistics format: [sent_rate, recv_rate, packet_rate, conn_count]
+                sent_rate = self._format_bytes(anomaly_data[0])
+                recv_rate = self._format_bytes(anomaly_data[1])
+                details = f"Network Stats | "
+                details += f"Sent: {sent_rate}/s | "
+                details += f"Received: {recv_rate}/s | "
+                details += f"Packets: {anomaly_data[2]}/s | "
+                details += f"Connections: {anomaly_data[3]}"
             elif isinstance(anomaly_data, (float, int)):
-                details = f"Anomaly Score: {float(anomaly_data):.3f}"
+                details = f"Anomaly Score: {float(anomaly_data):.2f}"
             else:
                 details = str(anomaly_data)
 
@@ -88,10 +115,18 @@ class AnomalyTable(QTableWidget):
             # Update row count
             self.row_count += 1
             
-            # Color code high scores
-            if isinstance(anomaly_data, dict) and anomaly_data.get('score', 0) > 0.7:
+            # Color code based on severity
+            if isinstance(anomaly_data, dict):
+                score = anomaly_data.get('score', 0)
+                if score > 0.7:
+                    color = QColor(255, 150, 150)  # Red for high severity
+                elif score > 0.4:
+                    color = QColor(255, 200, 150)  # Orange for medium severity
+                else:
+                    color = QColor(44, 62, 80)  # Default background
+                
                 for col in range(self.columnCount()):
-                    self.item(0, col).setBackground(QColor(255, 200, 200))
+                    self.item(0, col).setBackground(color)
             
             # Trim table if it exceeds maximum rows
             while self.rowCount() > self.max_rows:

@@ -51,6 +51,10 @@ class DDoSDetector:
         # Diagnostic information
         self.last_detection_info = {}
         
+        # Add state for periodic ML training
+        self.last_ml_train_time = 0.0
+        self.ml_train_interval = 300 # Retrain every 5 minutes (configurable)
+        
     def initialize_ml_models(self):
         """Initialize ML models with incremental learning capability where possible."""
         self.iso_forest = IsolationForest(
@@ -162,16 +166,24 @@ class DDoSDetector:
                 
             if not is_anomaly and self.detection_mode in [DETECTION_MODES["ML"], DETECTION_MODES["HYBRID"]]:
                 if len(self.baseline_window) >= MIN_SAMPLES_FOR_ML:
-                    # Incrementally update models
-                    if len(X) > 1:  # Only update if we have more than one sample
-                        try:
-                            self.iso_forest.fit(X)
-                            self.svm_detector.fit(X)
-                            self.lof_detector.fit(X)
-                        except Exception as e:
-                            self.log_message(f"Model update error: {str(e)}", LOG_LEVELS["ERROR"])
+                    current_time = time.time()
+                    # Check if it's time to retrain the ML models periodically
+                    if current_time - self.last_ml_train_time >= self.ml_train_interval:
+                        if len(X) > 1:  # Only train if we have sufficient historical data
+                            self.log_message(f"Attempting periodic ML model retraining (history size: {len(X)})...", LOG_LEVELS["INFO"])
+                            try:
+                                # Retrain models using the accumulated history
+                                self.iso_forest.fit(X)
+                                self.svm_detector.fit(X)
+                                self.lof_detector.fit(X)
+                                self.last_ml_train_time = current_time # Update last train time only on success
+                                self.log_message("ML models retrained successfully.", LOG_LEVELS["INFO"])
+                            except Exception as e:
+                                self.log_message(f"Model retraining error: {str(e)}", LOG_LEVELS["ERROR"])
+                        else:
+                            self.log_message("Skipping periodic ML retraining: not enough historical data.", LOG_LEVELS["DEBUG"])
                     
-                    # Check for anomaly using ML models
+                    # Always perform ML detection using the latest trained models
                     anomaly_votes = self.ml_detection(latest_data)
                     is_anomaly = anomaly_votes >= self.required_votes
                     

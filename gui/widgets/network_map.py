@@ -32,10 +32,10 @@ class NetworkMap(QWidget):
         
         # Initialize state
         self.last_update = 0
-        self.update_interval = 30  # Update every 30 seconds
+        self.update_interval = 5  # Reduced from 30 to 5 seconds
         self.connection_data = {}
         self.geo_cache = {}
-        self.last_geo_request = 0
+        self.last_geolocation_request = 0 # Renamed for clarity
         self.geo_rate_limit = 1.0  # One request per second
         
         # Load cached data
@@ -50,6 +50,11 @@ class NetworkMap(QWidget):
         # Connect signals
         self.signal_relay.data_signal.connect(self.update_connection_data)
         self.signal_relay.alert_signal.connect(self.handle_alert)
+        
+        # Timer for processing geolocation queue
+        self.geo_timer = QTimer(self)
+        self.geo_timer.timeout.connect(self.process_geo_queue)
+        self.geo_timer.start(1000) # Process queue every 1 second
         
     def setup_ui(self):
         """Setup the user interface."""
@@ -310,7 +315,6 @@ class NetworkMap(QWidget):
     def add_connection(self, ip: str, connection_data: dict):
         """Add or update a connection."""
         self.connections[ip] = connection_data
-        self.refresh_map()
         
     def update_threat_data(self, ip: str, threat_data: dict):
         """Update threat data for an IP."""
@@ -331,4 +335,6 @@ class NetworkMap(QWidget):
                 os.remove(self.current_map_file)
             except:
                 pass
+        # Stop the geo timer before closing
+        self.geo_timer.stop()
         super().closeEvent(event) 

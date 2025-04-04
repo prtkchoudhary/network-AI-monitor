@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QLabel,
                            QPushButton, QWidget, QFrame, QTextEdit, QMessageBox,
                            QApplication, QSplitter, QSizePolicy)
 from PyQt5.QtGui import QColor, QFont, QIcon, QPalette
-from PyQt5.QtCore import QTimer, Qt, QCoreApplication, QSize
+from PyQt5.QtCore import QTimer, Qt, QCoreApplication, QSize, pyqtSignal
 import pyqtgraph as pg
 from datetime import datetime
 
@@ -19,11 +19,15 @@ from utils.constants import (
 )
 from network_monitor import NetworkMonitor
 from ddos_detector import DDoSDetector
+from port_scan_monitor import PortScanMonitor
 from gui.widgets.anomaly_table import AnomalyTable
 from gui.widgets.network_map import NetworkMap
 
 class NetworkMonitorGUI(QMainWindow):
     """Main window for the Network Monitor application."""
+    
+    # Define a signal to safely pass anomaly data from the worker thread
+    anomaly_detected_signal = pyqtSignal(dict)
     
     def __init__(self):
         super().__init__()
@@ -67,6 +71,7 @@ class NetworkMonitorGUI(QMainWindow):
             self.signal_relay = SignalRelay()
             self.network_monitor = NetworkMonitor(self.signal_relay)
             self.ddos_detector = DDoSDetector(self.signal_relay)
+            self.port_scan_monitor = PortScanMonitor(self.signal_relay)
             
             # Setup UI
             self.initUI()
@@ -74,6 +79,10 @@ class NetworkMonitorGUI(QMainWindow):
             # Connect signals
             self.signal_relay.log_signal.connect(self.log_message)
             self.signal_relay.alert_signal.connect(self.show_alert)
+            # Connect the new anomaly signal to its handler slot
+            self.anomaly_detected_signal.connect(self.add_anomaly_to_table)
+            # Connect port scan signal
+            self.signal_relay.port_scan_signal.connect(self.handle_port_scan)
             
             # Setup timer
             self.timer = QTimer()
@@ -431,6 +440,9 @@ class NetworkMonitorGUI(QMainWindow):
             self.ddos_monitoring_thread.daemon = True
             self.ddos_monitoring_thread.start()
             
+            # Start port scan monitoring
+            self.port_scan_monitor.start_monitoring()
+            
             self.log_message("Monitoring started")
             
         except Exception as e:
@@ -449,6 +461,9 @@ class NetworkMonitorGUI(QMainWindow):
             # Wait for DDoS detection thread to finish
             if self.ddos_monitoring_thread:
                 self.ddos_monitoring_thread.join()
+            
+            # Stop port scan monitoring
+            self.port_scan_monitor.stop_monitoring()
             
             self.log_message("Monitoring stopped")
             
@@ -469,19 +484,21 @@ class NetworkMonitorGUI(QMainWindow):
                     result = self.ddos_detector.detect_ddos(history)
                     
                     if result:
-                        # Format anomaly data for the table
-                        anomaly_data = {
-                            'sent': sent_rate,
-                            'recv': recv_rate,
-                            'packets': packet_rate,
-                            'connections': conn_count,
-                            'timestamp': time.time()
-                        }
+                        # Add to anomaly table directly
+                        self.anomaly_table.add_anomaly([sent_rate, recv_rate, packet_rate, conn_count])
                         
-                        # Add to table in the main thread
-                        self.add_anomaly_to_table(anomaly_data)
+                        # Store for graph
+                        if hasattr(self, 'ddos_detector'):
+                            self.ddos_detector.anomalies.append((self.data_index, [sent_rate, recv_rate, packet_rate, conn_count]))
+                            
+                            # Keep only anomalies within the visible window
+                            window_start = self.data_index - HISTORY_SIZE
+                            self.ddos_detector.anomalies = [
+                                (idx, data) for idx, data in self.ddos_detector.anomalies 
+                                if idx > window_start
+                            ]
                         
-                        # Log the alert
+                        # Log the alert (can still use signal relay for general logs)
                         self.signal_relay.log_signal.emit(
                             f"⚠ DDoS Alert: Abnormal traffic detected! "
                             f"Packets: {packet_rate}, Connections: {conn_count}"
@@ -496,51 +513,21 @@ class NetworkMonitorGUI(QMainWindow):
             self.stop_monitoring()
 
     def add_anomaly_to_table(self, anomaly_data):
-        """Add anomaly to table from the main thread."""
+        """Add anomaly to table from the main thread (now a slot)."""
         try:
-            # Create formatted anomaly data
-            formatted_data = [
-                anomaly_data['sent'],
-                anomaly_data['recv'],
-                anomaly_data['packets'],
-                anomaly_data['connections']
-            ]
-            
             # Add to table
-            self.anomaly_table.add_anomaly(formatted_data)
-            
-            # Update graph anomalies with current time index
-            if hasattr(self, 'ddos_detector'):
-                # Store the actual data index with the anomaly
-                self.ddos_detector.anomalies.append((self.data_index, formatted_data))
-                
-                # Keep only anomalies within the visible window
-                window_start = self.data_index - HISTORY_SIZE
-                self.ddos_detector.anomalies = [
-                    (idx, data) for idx, data in self.ddos_detector.anomalies 
-                    if idx > window_start
-                ]
-        
+            self.anomaly_table.add_anomaly(anomaly_data)
         except Exception as e:
             self.log_message(f"Error adding anomaly to table: {str(e)}")
 
     def closeEvent(self, event):
         """Handle application closure."""
         try:
-            reply = QMessageBox.question(
-                self, 'Close Confirmation', 
-                "Are you sure you want to exit the Network Monitor?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
-
-            if reply == QMessageBox.Yes:
-                self.stop_monitoring()
-                if hasattr(self, 'network_map'):
-                    self.network_map.close()
-                QCoreApplication.instance().quit()
-                event.accept()
-            else:
-                event.ignore()
+            self.stop_monitoring()
+            if hasattr(self, 'network_map'):
+                self.network_map.close()
+            QCoreApplication.instance().quit()
+            event.accept()
         except Exception as e:
             self.log_message(f"Error during application closure: {str(e)}")
             event.accept()  # Force close if there's an error
@@ -592,6 +579,38 @@ class NetworkMonitorGUI(QMainWindow):
             self.log_message(log_message)
             
             # Update threat data in map
+            if hasattr(self, 'network_map'):
+                self.network_map.update_threat_data(
+                    formatted_anomaly.get('ip', 'Unknown'),
+                    formatted_anomaly.get('score', 0)
+                )
+        except Exception as e:
+            self.log_message(f"Error handling anomaly: {str(e)}")
+            
+    def handle_port_scan(self, scan_data):
+        """Handle port scan detection events."""
+        try:
+            if isinstance(scan_data, dict):
+                # Format port scan data for the anomaly table
+                formatted_scan = {
+                    'ip': scan_data.get('ip', 'Unknown'),
+                    'score': float(scan_data.get('unique_ports', 0)) / 15.0,  # Normalize score
+                    'type': 'Port Scan',
+                    'details': f"Unique Ports: {scan_data.get('unique_ports', 0)}, "
+                              f"Common Ports: {scan_data.get('common_ports_hit', 0)}"
+                }
+                
+                # Add to anomaly table
+                if hasattr(self, 'anomaly_table'):
+                    self.anomaly_table.add_anomaly(formatted_scan)
+                
+                # Log the port scan
+                self.log_message(
+                    f"⚠ Port Scan Detected from {formatted_scan['ip']} - "
+                    f"{formatted_scan['details']}"
+                )
+        except Exception as e:
+            self.log_message(f"Error handling port scan: {str(e)}")
             if hasattr(self, 'network_map'):
                 self.network_map.update_threat_data(
                     formatted_anomaly.get('ip', 'Unknown'),

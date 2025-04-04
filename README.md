@@ -25,7 +25,7 @@ A real-time network monitoring application with AI-powered DDoS detection capabi
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd AI-driven-network-monitor
+cd network monitor
 ```
 
 2. Install dependencies:
